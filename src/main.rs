@@ -1,6 +1,4 @@
-pub mod tensor;
-
-use crate::tensor::{Device, Tensor};
+use mashinko::tensor::{Device, Tensor};
 
 fn main() {
     // dtype is inferred from the Vec element type — no enum needed

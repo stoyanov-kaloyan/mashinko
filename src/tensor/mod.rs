@@ -60,6 +60,7 @@ impl TensorElement for i32 {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Tensor<T: TensorElement> {
     data: Vec<T>,
     shape: Vec<usize>,
@@ -149,6 +150,27 @@ impl<T: TensorElement> Tensor<T> {
 
     pub fn type_name(&self) -> &'static str {
         T::type_name()
+    }
+
+    /// 0 − x.
+    pub fn neg(&self) -> Self {
+        let data = self.data.iter().map(|x| T::default() - x.clone()).collect();
+        Self {
+            data,
+            shape: self.shape.clone(),
+            device: self.device,
+            requires_grad: self.requires_grad,
+        }
+    }
+
+    /// A zero tensor with the same shape and device.
+    pub fn zeros_like(&self) -> Self {
+        Self::zeros(self.shape.clone(), self.device)
+    }
+
+    /// A ones tensor with the same shape and device.
+    pub fn ones_like(&self) -> Self {
+        Self::ones(self.shape.clone(), self.device)
     }
 
     /// Element-wise addition.  Shape mismatch is the only possible runtime
