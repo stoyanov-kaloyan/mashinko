@@ -13,6 +13,10 @@ pub enum Operation {
     Dot,
     Transpose,
     Sum,
+    Mean,
+    ReLU,
+    Sigmoid,
+    Tanh,
 }
 
 pub struct Node {
@@ -83,6 +87,36 @@ impl Node {
         Self::from_op(tensor_array, Operation::Sum, vec![a.clone()], true)
     }
 
+    /// Reducing mean
+    pub fn mean(a: &NodeRef) -> NodeRef {
+        let tensor = arrayfire::mean_all(a.borrow().tensor()).0;
+        let tensor = tensor as f32;
+        let tensor_array = Array::new(&[tensor], arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        Self::from_op(tensor_array, Operation::Mean, vec![a.clone()], true)
+    }
+
+    // activation functions
+
+    pub fn sigmoid(a: &NodeRef) -> NodeRef {
+        let neg_a = -a.borrow().tensor().clone();
+        let tensor = 1.0f32 / (1.0f32 + arrayfire::exp(&neg_a));
+        Self::from_op(tensor, Operation::Sigmoid, vec![a.clone()], true)
+    }
+
+    /// relu - max(0, x)
+    pub fn relu(a: &NodeRef) -> NodeRef {
+        let a_tensor = a.borrow().tensor().clone();
+        let zero = arrayfire::constant(0.0f32, a_tensor.dims());
+        let mask = arrayfire::gt(&a_tensor, &zero, false);
+        let tensor = arrayfire::select(&a_tensor, &mask, &zero);
+        Self::from_op(tensor, Operation::ReLU, vec![a.clone()], true)
+    }
+
+    pub fn tanh(a: &NodeRef) -> NodeRef {
+        let tensor = arrayfire::tanh(&a.borrow().tensor());
+        Self::from_op(tensor, Operation::Tanh, vec![a.clone()], true)
+    }
+
     pub fn tensor(&self) -> &Array<f32> {
         &self.tensor
     }
@@ -108,6 +142,7 @@ impl Node {
     }
 
     /// Run a single backward step for this node
+    /// This is where we compute gradients
     pub fn backward(&mut self) {
         let dz = match &self.grad {
             Some(g) => g.clone(),
@@ -154,10 +189,41 @@ impl Node {
                 acc_grad(&self.parents[1], &(&dz * &a_data));
             }
             Some(Operation::Sum) => {
+                // z = sum(a)  ->  da = dz broadcast to a shape
                 let parent_dims = self.parents[0].borrow().tensor.dims();
                 let ones = arrayfire::constant(1.0f32, parent_dims);
                 // dz is a scalar (1x1); multiply broadcasts it to parent shape
                 acc_grad(&self.parents[0], &(&ones * &dz));
+            }
+            Some(Operation::Mean) => {
+                // z = mean(a)  ->  da = dz broadcast to a shape / num_elements
+                let parent_dims = self.parents[0].borrow().tensor.dims();
+                let num_elements =
+                    (parent_dims[0] * parent_dims[1] * parent_dims[2] * parent_dims[3]) as f32;
+                let ones = arrayfire::constant(1.0f32 / num_elements, parent_dims);
+                acc_grad(&self.parents[0], &(&ones * &dz));
+            }
+            Some(Operation::ReLU) => {
+                // relu(x) = max(0, x)  ->  da = dz * (x > 0)
+                let a_data = self.parents[0].borrow().tensor.clone();
+                let zero = arrayfire::constant(0.0f32, a_data.dims());
+                let mask = arrayfire::gt(&a_data, &zero, false);
+                let mask_f32 = mask.cast::<f32>();
+                acc_grad(&self.parents[0], &(&dz * &mask_f32));
+            }
+            Some(Operation::Sigmoid) => {
+                // s(x) ->  da = dz * s(x) * (1 - s(x))
+                let sig = &self.tensor;
+                let one = arrayfire::constant(1.0f32, sig.dims());
+                let da = &dz * sig * &(one - sig);
+                acc_grad(&self.parents[0], &da);
+            }
+            Some(Operation::Tanh) => {
+                // tanh(x) ->  da = dz * (1 - tanh(x)^2)
+                let tanh_x = &self.tensor;
+                let one = arrayfire::constant(1.0f32, tanh_x.dims());
+                let da = &dz * &(one - tanh_x * tanh_x);
+                acc_grad(&self.parents[0], &da);
             }
             Some(op) => {
                 unimplemented!("backward not implemented for {:?}", op)

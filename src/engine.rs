@@ -45,20 +45,9 @@ fn build_topo(node: NodeRef, topo: &mut Vec<NodeRef>, visited: &mut HashSet<usiz
 
 #[cfg(test)]
 mod tests {
-    use crate::af_tensor::Node;
     use crate::engine::backward;
-    use arrayfire::{Array, Dim4, abs, constant, max_all};
-
-    fn assert_all_close(a: &Array<f32>, b: &Array<f32>, tol: f32) {
-        let diff = abs(&(a - b));
-        let (max_err, _) = max_all(&diff);
-        assert!(
-            max_err < tol as f32,
-            "arrays differ: max error {} > tolerance {}",
-            max_err,
-            tol
-        );
-    }
+    use crate::{af_tensor::Node, utils::assert_all_close};
+    use arrayfire::{Array, Dim4, constant};
 
     #[test]
     fn test_add_backward() {
@@ -185,5 +174,38 @@ mod tests {
 
         assert_all_close(&dx, &expected_dx, 1e-5);
         assert_all_close(&dw, &expected_dw, 1e-5);
+    }
+
+    #[test]
+    fn test_sigmoid() {
+        let x_tensor = arrayfire::constant(0.0f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        let x = crate::af_tensor::Node::leaf(x_tensor, true);
+        let z = crate::af_tensor::Node::sigmoid(&x);
+        crate::engine::backward(z);
+
+        let expected_grad = arrayfire::constant(0.25f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        assert_all_close(x.borrow().grad().unwrap(), &expected_grad, 1e-5);
+    }
+
+    #[test]
+    fn test_relu() {
+        let x_tensor = arrayfire::constant(-1.0f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        let x = crate::af_tensor::Node::leaf(x_tensor, true);
+        let z = crate::af_tensor::Node::relu(&x);
+        crate::engine::backward(z);
+
+        let expected_grad = arrayfire::constant(0.0f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        assert_all_close(x.borrow().grad().unwrap(), &expected_grad, 1e-5);
+    }
+
+    #[test]
+    fn test_tanh() {
+        let x_tensor = arrayfire::constant(0.0f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        let x = crate::af_tensor::Node::leaf(x_tensor, true);
+        let z = crate::af_tensor::Node::tanh(&x);
+        crate::engine::backward(z);
+
+        let expected_grad = arrayfire::constant(1.0f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        assert_all_close(x.borrow().grad().unwrap(), &expected_grad, 1e-5);
     }
 }
