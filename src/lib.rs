@@ -1,5 +1,6 @@
 pub mod af_tensor;
 pub mod engine;
+pub mod examples;
 pub mod layer;
 pub mod loss;
 pub mod optimizer;
