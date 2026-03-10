@@ -128,6 +128,11 @@ impl Node {
         Self::from_op(tensor, Operation::Log, vec![a.clone()], true)
     }
 
+    pub fn transpose(a: &NodeRef) -> NodeRef {
+        let tensor = arrayfire::transpose(&a.borrow().tensor(), false);
+        Self::from_op(tensor, Operation::Transpose, vec![a.clone()], true)
+    }
+
     // activation functions
 
     pub fn sigmoid(a: &NodeRef) -> NodeRef {
@@ -284,6 +289,11 @@ impl Node {
                 // z = -a  ->  da = -dz
                 acc_grad(&self.parents[0], &(-dz));
             }
+            Some(Operation::Transpose) => {
+                // z = a^T  ->  da = dz^T
+                let dz_data = self.tensor.clone();
+                acc_grad(&self.parents[0], &arrayfire::transpose(&dz_data, false));
+            }
             Some(op) => {
                 unimplemented!("backward not implemented for {:?}", op)
             }
@@ -293,7 +303,7 @@ impl Node {
     }
 }
 
-/// Accumulate gradient into a node
+/// Accumulate gradient into a node, reducing along broadcast dimensions
 fn acc_grad(node: &NodeRef, contribution: &Array<f32>) {
     let mut node = node.borrow_mut();
 
@@ -301,8 +311,19 @@ fn acc_grad(node: &NodeRef, contribution: &Array<f32>) {
         return;
     }
 
+    // there was a bug here where dimensions got broadcast wrong
+    let param_dims = node.tensor.dims();
+    let grad_dims = contribution.dims();
+    let mut reduced = contribution.clone();
+
+    for dim in 0..4 {
+        if param_dims[dim] == 1 && grad_dims[dim] > 1 {
+            reduced = arrayfire::sum(&reduced, dim as i32);
+        }
+    }
+
     node.grad = Some(match node.grad.take() {
-        Some(existing) => existing + contribution,
-        None => contribution.clone(),
+        Some(existing) => existing + &reduced,
+        None => reduced,
     });
 }
