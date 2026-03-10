@@ -9,6 +9,7 @@ pub enum Operation {
     Add,
     Sub,
     Mul,
+    Div,
     MatMul,
     Dot,
     Transpose,
@@ -17,6 +18,9 @@ pub enum Operation {
     ReLU,
     Sigmoid,
     Tanh,
+    Clamp,
+    Log,
+    Neg,
 }
 
 pub struct Node {
@@ -53,6 +57,15 @@ impl Node {
         }))
     }
 
+    pub fn set_tensor(&mut self, tensor: Array<f32>) {
+        self.tensor = tensor;
+    }
+
+    pub fn constant(value: f32, dims: arrayfire::Dim4) -> NodeRef {
+        let tensor = arrayfire::constant(value, dims);
+        Self::leaf(tensor, false)
+    }
+
     // operation constructors
 
     pub fn add(a: &NodeRef, b: &NodeRef) -> NodeRef {
@@ -68,6 +81,16 @@ impl Node {
     pub fn mul(a: &NodeRef, b: &NodeRef) -> NodeRef {
         let tensor = a.borrow().tensor() * b.borrow().tensor();
         Self::from_op(tensor, Operation::Mul, vec![a.clone(), b.clone()], true)
+    }
+
+    pub fn div(a: &NodeRef, b: &NodeRef) -> NodeRef {
+        let tensor = a.borrow().tensor() / b.borrow().tensor();
+        Self::from_op(tensor, Operation::Div, vec![a.clone(), b.clone()], true)
+    }
+
+    pub fn neg(a: &NodeRef) -> NodeRef {
+        let tensor = -a.borrow().tensor().clone();
+        Self::from_op(tensor, Operation::Neg, vec![a.clone()], true)
     }
 
     pub fn matmul(a: &NodeRef, b: &NodeRef) -> NodeRef {
@@ -93,6 +116,16 @@ impl Node {
         let tensor = tensor as f32;
         let tensor_array = Array::new(&[tensor], arrayfire::Dim4::new(&[1, 1, 1, 1]));
         Self::from_op(tensor_array, Operation::Mean, vec![a.clone()], true)
+    }
+
+    pub fn clamp(a: &NodeRef, min: f32, max: f32) -> NodeRef {
+        let tensor = arrayfire::clamp(a.borrow().tensor(), &min, &max, true);
+        Self::from_op(tensor, Operation::Clamp, vec![a.clone()], true)
+    }
+
+    pub fn log(a: &NodeRef) -> NodeRef {
+        let tensor = arrayfire::log(&a.borrow().tensor());
+        Self::from_op(tensor, Operation::Log, vec![a.clone()], true)
     }
 
     // activation functions
@@ -168,6 +201,14 @@ impl Node {
                 acc_grad(&self.parents[0], &(&dz * &b_data));
                 acc_grad(&self.parents[1], &(&dz * &a_data));
             }
+            Some(Operation::Div) => {
+                // z = a / b  ->  da = dz / b, db = -dz * a / b^2
+                let a_data = self.parents[0].borrow().tensor.clone();
+                let b_data = self.parents[1].borrow().tensor.clone();
+                let b_squared = &b_data * &b_data;
+                acc_grad(&self.parents[0], &(&dz / &b_data));
+                acc_grad(&self.parents[1], &(-dz * &a_data / &b_squared));
+            }
             Some(Operation::MatMul) => {
                 // z = a @ b  ->  da = dz @ b^T, db = a^T @ dz
                 let a_data = self.parents[0].borrow().tensor.clone();
@@ -224,6 +265,24 @@ impl Node {
                 let one = arrayfire::constant(1.0f32, tanh_x.dims());
                 let da = &dz * &(one - tanh_x * tanh_x);
                 acc_grad(&self.parents[0], &da);
+            }
+            Some(Operation::Log) => {
+                // log(x) ->  da = dz / x
+                let x = &self.parents[0].borrow().tensor;
+                acc_grad(&self.parents[0], &(&dz / x));
+            }
+            Some(Operation::Clamp) => {
+                // clamp(x, min, max) -> da = dz where min < x < max else 0
+                let x = &self.parents[0].borrow().tensor;
+                let min_mask = arrayfire::gt(x, &arrayfire::constant(0.0f32, x.dims()), false);
+                let max_mask = arrayfire::lt(x, &arrayfire::constant(1.0f32, x.dims()), false);
+                let mask = arrayfire::mul(&min_mask, &max_mask, false);
+                let mask_f32 = mask.cast::<f32>();
+                acc_grad(&self.parents[0], &(&dz * &mask_f32));
+            }
+            Some(Operation::Neg) => {
+                // z = -a  ->  da = -dz
+                acc_grad(&self.parents[0], &(-dz));
             }
             Some(op) => {
                 unimplemented!("backward not implemented for {:?}", op)
