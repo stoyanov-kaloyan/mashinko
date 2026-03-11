@@ -20,9 +20,9 @@ pub struct DataLoader {
 }
 
 impl DataLoader {
-    pub fn new(dataset: Dataset, batch_size: usize, shuffle: bool) -> Self {
+    pub fn new(dataset: &Dataset, batch_size: usize, shuffle: bool) -> Self {
         Self {
-            dataset,
+            dataset: Dataset::new(dataset.x.clone(), dataset.y.clone()),
             batch_size,
             shuffle,
         }
