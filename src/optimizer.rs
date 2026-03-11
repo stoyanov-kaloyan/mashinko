@@ -27,9 +27,8 @@ impl Optimizer for SGD {
     fn zero_grad(&mut self, parameters: &[NodeRef]) {
         for param in parameters {
             let zero_tensor = Node::constant(0.0_f32, param.borrow().tensor().dims());
-            param
-                .borrow_mut()
-                .set_grad(zero_tensor.borrow().tensor().clone());
+            let mut p = param.borrow_mut();
+            p.set_grad(zero_tensor.borrow().tensor().clone());
         }
     }
 }
