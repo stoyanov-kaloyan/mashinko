@@ -41,7 +41,7 @@ pub fn mnist_example() {
 
     // Large batches keep GPU busier but shrink gradient magnitude (we average by batch),
     // which made updates too small in practice for this handcrafted backend.
-    let data_loader = crate::data::DataLoader::new(&dataset, 128, true);
+    let data_loader = crate::data::DataLoader::new(&dataset, 1024, true);
 
     let model = sequential![
         Permute::new([1, 2, 3, 0]),
@@ -60,7 +60,7 @@ pub fn mnist_example() {
 
     println!("Training MNIST with CNN\n");
 
-    let num_epochs = 10;
+    let num_epochs = 5;
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0f32;
         let mut batch_count = 0;

@@ -60,9 +60,29 @@ pub fn parse_idx_file(path: &str, normalize: bool) -> Array<f32> {
     let data_offset = 4 + num_dims * 4;
     let data = &buffer[data_offset..];
 
-    // Create ArrayFire array and cast to f32
-    let array = Array::new(data, arrayfire::Dim4::new(&dims));
-    let result = array.cast::<f32>();
+    // IDX payloads are stored in row-major order, while ArrayFire arrays are
+    // column-major. For tensors with more than one axis, load the raw bytes
+    // using reversed storage dims so the linear buffer is interpreted
+    // correctly, then reorder back to the logical IDX axis order expected by
+    // the rest of the codebase.
+    let mut storage_dims = [1u64; 4];
+    for i in 0..num_dims {
+        storage_dims[i] = dims[num_dims - 1 - i];
+    }
+    for i in num_dims..4 {
+        storage_dims[i] = 1;
+    }
+
+    let array = Array::new(data, arrayfire::Dim4::new(&storage_dims)).cast::<f32>();
+    let result = if num_dims > 1 {
+        let mut perm = [0u64, 1, 2, 3];
+        for (logical_axis, slot) in perm.iter_mut().enumerate().take(num_dims) {
+            *slot = (num_dims - 1 - logical_axis) as u64;
+        }
+        arrayfire::reorder_v2(&array, perm[0], perm[1], Some(vec![perm[2], perm[3]]))
+    } else {
+        array
+    };
 
     if normalize {
         result / 255.0f32 // Normalize pixel values to [0, 1]
