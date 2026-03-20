@@ -7,7 +7,9 @@ pub struct Linear {
     pub name: Option<String>,
 }
 
-pub struct ReLU;
+pub struct ReLU {
+    pub name: Option<String>,
+}
 
 pub struct Conv2D {
     pub weight: NodeRef,
@@ -24,10 +26,13 @@ pub struct MaxPool {
     pub name: Option<String>,
 }
 
-pub struct Flatten;
-
 pub struct Permute {
     pub perm: [u64; 4],
+    pub name: Option<String>,
+}
+
+pub struct Flatten {
+    pub name: Option<String>,
 }
 
 /// A simple Multi-Layer Perceptron with configurable layer sizes.
@@ -74,7 +79,7 @@ impl Linear {
 
 impl ReLU {
     pub fn new() -> Self {
-        Self
+        Self { name: None }
     }
 }
 
@@ -149,13 +154,13 @@ impl MaxPool {
 
 impl Flatten {
     pub fn new() -> Self {
-        Self
+        Self { name: None }
     }
 }
 
 impl Permute {
     pub fn new(perm: [u64; 4]) -> Self {
-        Self { perm }
+        Self { perm, name: None }
     }
 }
 
@@ -219,10 +224,69 @@ impl HasParameters for Layer {
     }
 }
 
+impl Layer {
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Layer::Linear(l) => l.name.as_deref(),
+            Layer::ReLU(r) => r.name.as_deref(),
+            Layer::Conv2D(c) => c.name.as_deref(),
+            Layer::MaxPool(m) => m.name.as_deref(),
+            Layer::Flatten(f) => f.name.as_deref(),
+            Layer::Permute(p) => p.name.as_deref(),
+        }
+    }
+
+    pub fn set_name<S: Into<String>>(&mut self, name: S) {
+        let name = Some(name.into());
+        match self {
+            Layer::Linear(l) => l.name = name,
+            Layer::ReLU(r) => r.name = name,
+            Layer::Conv2D(c) => c.name = name,
+            Layer::MaxPool(m) => m.name = name,
+            Layer::Flatten(f) => f.name = name,
+            Layer::Permute(p) => p.name = name,
+        }
+    }
+
+    pub fn named_parameters(&self) -> Vec<(String, NodeRef)> {
+        let Some(prefix) = self.name() else {
+            return vec![];
+        };
+
+        match self {
+            Layer::Linear(l) => vec![
+                (format!("{prefix}.weight"), l.weight.clone()),
+                (format!("{prefix}.bias"), l.bias.clone()),
+            ],
+            Layer::Conv2D(c) => vec![
+                (format!("{prefix}.weight"), c.weight.clone()),
+                (format!("{prefix}.bias"), c.bias.clone()),
+            ],
+            Layer::ReLU(_)
+            | Layer::MaxPool(_)
+            | Layer::Flatten(_)
+            | Layer::Permute(_) => vec![],
+        }
+    }
+}
+
 /// Sequential allows composing multiple layers together
 impl Sequential {
-    pub fn new(layers: Vec<Layer>) -> Self {
+    pub fn new(mut layers: Vec<Layer>) -> Self {
+        for (index, layer) in layers.iter_mut().enumerate() {
+            if layer.name().is_none() {
+                layer.set_name(format!("layers.{index}"));
+            }
+        }
         Self { layers }
+    }
+
+    pub fn named_parameters(&self) -> Vec<(String, NodeRef)> {
+        let mut params = Vec::new();
+        for layer in &self.layers {
+            params.extend(layer.named_parameters());
+        }
+        params
     }
 }
 
@@ -338,4 +402,63 @@ macro_rules! sequential {
     ($($layer:expr),+ $(,)?) => {
         Sequential::new(vec![$($crate::layer::Layer::from($layer)),+])
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Conv2D, Layer, Linear, MaxPool, ReLU, Sequential};
+    use std::rc::Rc;
+
+    #[test]
+    fn sequential_assigns_default_hierarchical_layer_names() {
+        let model = Sequential::new(vec![
+            Layer::from(Linear::new(4, 8)),
+            Layer::from(ReLU::new()),
+            Layer::from(MaxPool::new(2, 2)),
+        ]);
+
+        assert_eq!(model.layers[0].name(), Some("layers.0"));
+        assert_eq!(model.layers[1].name(), Some("layers.1"));
+        assert_eq!(model.layers[2].name(), Some("layers.2"));
+    }
+
+    #[test]
+    fn sequential_preserves_existing_layer_names() {
+        let mut linear = Linear::new(4, 8);
+        linear.name = Some("encoder.proj".to_string());
+
+        let model = Sequential::new(vec![Layer::from(linear), Layer::from(ReLU::new())]);
+
+        assert_eq!(model.layers[0].name(), Some("encoder.proj"));
+        assert_eq!(model.layers[1].name(), Some("layers.1"));
+    }
+
+    #[test]
+    fn sequential_named_parameters_use_hierarchical_names() {
+        let linear = Linear::new(4, 8);
+        let linear_weight = linear.weight.clone();
+        let linear_bias = linear.bias.clone();
+
+        let conv = Conv2D::new(1, 2, 3);
+        let conv_weight = conv.weight.clone();
+        let conv_bias = conv.bias.clone();
+
+        let model = Sequential::new(vec![
+            Layer::from(linear),
+            Layer::from(ReLU::new()),
+            Layer::from(conv),
+        ]);
+
+        let named_params = model.named_parameters();
+
+        assert_eq!(named_params.len(), 4);
+        assert_eq!(named_params[0].0, "layers.0.weight");
+        assert!(Rc::ptr_eq(&named_params[0].1, &linear_weight));
+        assert_eq!(named_params[1].0, "layers.0.bias");
+        assert!(Rc::ptr_eq(&named_params[1].1, &linear_bias));
+        assert_eq!(named_params[2].0, "layers.2.weight");
+        assert!(Rc::ptr_eq(&named_params[2].1, &conv_weight));
+        assert_eq!(named_params[3].0, "layers.2.bias");
+        assert!(Rc::ptr_eq(&named_params[3].1, &conv_bias));
+    }
 }
