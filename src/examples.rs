@@ -1,50 +1,42 @@
 use crate::{
     af_tensor::Node,
-    data::DataLoader,
+    data::{HostDataLoader, HostDataset},
     engine::backward,
     layer::{Conv2D, Flatten, HasParameters, Linear, MLP, MaxPool, Permute, ReLU, Sequential},
     loss::{cross_entropy, mse},
     optimizer::{Optimizer, SGD},
     sequential,
-    utils::{argmax, parse_idx_file},
+    utils::{argmax, one_hot_encode_host, parse_idx_file_host},
 };
 use arrayfire::{Dim4, af_print};
 
 pub fn mnist_example() {
-    let train_images = parse_idx_file("datasets/mnist/train-images.idx3-ubyte", true);
-    let train_labels = parse_idx_file("datasets/mnist/train-labels.idx1-ubyte", false);
-    eprintln!("train_images dims: {:?}", train_images.dims());
-    eprintln!("train_labels dims: {:?}", train_labels.dims());
+    let (train_images, train_image_dims) =
+        parse_idx_file_host("datasets/mnist/train-images.idx3-ubyte", true);
+    let (train_labels, train_label_dims) =
+        parse_idx_file_host("datasets/mnist/train-labels.idx1-ubyte", false);
+    eprintln!("train_images dims: {:?}", train_image_dims);
+    eprintln!("train_labels dims: {:?}", train_label_dims);
 
     // Images: (60000, 28, 28, 1) from IDX parser
     // DataLoader batches along dim 0 → (batch, 28, 28, 1)
     // Permute layer in model converts to (28, 28, 1, batch) for conv ops
-    let n_samples = train_images.dims()[0];
+    let n_samples = train_image_dims[0];
+    let labels_onehot = one_hot_encode_host(&train_labels, n_samples as usize, 10);
 
-    // One-hot encode labels: (60000,1,1,1) → (60000, 10)
-    let labels_onehot = {
-        let num_classes = 10u64;
-        let classes = arrayfire::range::<f32>(Dim4::new(&[num_classes, 1, 1, 1]), 0);
-        let classes_tiled = arrayfire::tile(&classes, Dim4::new(&[1, n_samples, 1, 1]));
-        let labels_row = arrayfire::moddims(&train_labels, Dim4::new(&[1, n_samples, 1, 1]));
-        let labels_tiled = arrayfire::tile(&labels_row, Dim4::new(&[num_classes, 1, 1, 1]));
-        let one_hot = arrayfire::eq(&classes_tiled, &labels_tiled, false).cast::<f32>();
-        arrayfire::transpose(&one_hot, false) // (n_samples, 10)
-    };
-    // drop(train_labels);
-    // arrayfire::device_gc();
-
-    let dataset = crate::data::Dataset::new(
-        Node::leaf(train_images, false),
-        Node::leaf(labels_onehot, false),
+    let dataset = HostDataset::new(
+        train_images,
+        train_image_dims,
+        labels_onehot,
+        Dim4::new(&[n_samples, 10, 1, 1]),
     );
 
     // Large batches keep GPU busier but shrink gradient magnitude (we average by batch),
     // which made updates too small in practice for this handcrafted backend.
-    let data_loader = crate::data::DataLoader::new(&dataset, 2048, true);
+    let data_loader = HostDataLoader::new(&dataset, 2048, true);
 
     let model = sequential![
-        Permute::new([1, 2, 3, 0]),
+        Permute::nhwc_to_hwcn(),
         Conv2D::new(1, 8, 5),
         ReLU::new(),
         MaxPool::new(2, 2),
@@ -52,7 +44,7 @@ pub fn mnist_example() {
         ReLU::new(),
         MaxPool::new(2, 2),
         Flatten::new(),
-        Linear::new(784, 10),
+        Linear::lazy(10),
     ];
 
     // Compensate for smaller effective step under averaged CE gradients.
@@ -93,7 +85,7 @@ pub fn mnist_example() {
 
     println!("\n Validation on training set (for demonstration) \n");
     let accuracy = {
-        let eval_loader = DataLoader::new(&dataset, 1024, false);
+        let eval_loader = HostDataLoader::new(&dataset, 1024, false);
         let mut num_correct = 0.0f32;
 
         for (x_batch, y_batch) in &eval_loader {
@@ -199,6 +191,12 @@ pub fn linear_example() {
     af_print!("x", x.borrow().tensor());
     af_print!("y_true", y_true.borrow().tensor());
     af_print!("y_pred", y_pred.borrow().tensor());
-    af_print!("weight (expect ~3)", model.weight.borrow().tensor());
-    af_print!("bias   (expect ~1)", model.bias.borrow().tensor());
+    af_print!(
+        "weight (expect ~3)",
+        model.weight().expect("linear example weight missing").borrow().tensor()
+    );
+    af_print!(
+        "bias   (expect ~1)",
+        model.bias().expect("linear example bias missing").borrow().tensor()
+    );
 }

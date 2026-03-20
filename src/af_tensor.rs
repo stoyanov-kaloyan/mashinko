@@ -1,4 +1,4 @@
-use arrayfire::{Array, MatProp, matmul};
+use arrayfire::{Array, ConvGradientType, Dim4, MatProp, matmul};
 use std::cell::RefCell;
 use std::ops::Mul;
 use std::rc::Rc;
@@ -34,7 +34,11 @@ pub enum Operation {
         target: Array<f32>,
         scale: f32,
     },
-    Conv2D,
+    Conv2D {
+        stride: [u64; 2],
+        padding: [u64; 2],
+        dilation: [u64; 2],
+    },
     MaxPool {
         pool_size: u64,
         stride: u64,
@@ -254,36 +258,27 @@ impl Node {
         )
     }
 
-    pub fn conv2d(input: &NodeRef, weight: &NodeRef) -> NodeRef {
+    pub fn conv2d(
+        input: &NodeRef,
+        weight: &NodeRef,
+        stride: [u64; 2],
+        padding: [u64; 2],
+        dilation: [u64; 2],
+    ) -> NodeRef {
         let signal = input.borrow().tensor().clone(); // [H, W, C_in, N]
         let filter = weight.borrow().tensor().clone(); // [FH, FW, C_in, C_out]
-        let c_out = filter.dims()[3];
-        let mode = arrayfire::ConvMode::DEFAULT;
-        let domain = arrayfire::ConvDomain::AUTO;
-
-        // Loop over output channels: for each k, convolve signal[H,W,C_in,N] with
-        // filter_k[FH,FW,C_in,1]. Batching: signal dim3=N vs filter dim3=1 → BATCH_LHS ✓
-        // Then sum over C_in (dim2) → [H,W,1,N].
-        let channels: Vec<Array<f32>> = (0..c_out)
-            .map(|k| {
-                let filter_k = arrayfire::index(
-                    &filter,
-                    &[
-                        arrayfire::seq!(),
-                        arrayfire::seq!(),
-                        arrayfire::seq!(),
-                        arrayfire::seq!(k as i32, k as i32, 1),
-                    ],
-                );
-                let conv_k = arrayfire::convolve2(&signal, &filter_k, mode, domain);
-                arrayfire::sum(&conv_k, 2)
-            })
-            .collect();
-
-        let tensor = join_along(2, channels);
+        let stride_dims = Dim4::new(&[stride[0], stride[1], 1, 1]);
+        let padding_dims = Dim4::new(&[padding[0], padding[1], 1, 1]);
+        let dilation_dims = Dim4::new(&[dilation[0], dilation[1], 1, 1]);
+        let tensor =
+            arrayfire::convolve2_nn(&signal, &filter, stride_dims, padding_dims, dilation_dims);
         Self::from_op(
             tensor,
-            Operation::Conv2D,
+            Operation::Conv2D {
+                stride,
+                padding,
+                dilation,
+            },
             vec![input.clone(), weight.clone()],
             true,
         )
@@ -291,18 +286,35 @@ impl Node {
 
     pub fn max_pool(input: &NodeRef, pool_size: u64, stride: u64) -> NodeRef {
         let tensor = input.borrow().tensor().clone();
-        let dim0 = tensor.dims()[0] as i32;
-        let dim1 = tensor.dims()[1] as i32;
+        let input_dims = tensor.dims();
+        let dim0 = input_dims[0] as i32;
+        let dim1 = input_dims[1] as i32;
         let ps = pool_size as i32;
         let st = stride as i32;
+
+        assert!(
+            pool_size > 0 && stride > 0,
+            "max_pool expects positive pool_size/stride, got pool_size={}, stride={}",
+            pool_size,
+            stride
+        );
+        assert!(
+            dim0 >= ps && dim1 >= ps,
+            "max_pool expects input spatial dims >= pool_size, got input={:?}, pool_size={}",
+            input_dims,
+            pool_size
+        );
+
+        let row_end_base = dim0 - ps;
+        let col_end_base = dim1 - ps;
 
         let mut result: Option<Array<f32>> = None;
 
         for i in 0..ps {
             for j in 0..ps {
                 let indices = &[
-                    arrayfire::seq!(i, dim0 - 1, st),
-                    arrayfire::seq!(j, dim1 - 1, st),
+                    arrayfire::seq!(i, row_end_base + i, st),
+                    arrayfire::seq!(j, col_end_base + j, st),
                     arrayfire::seq!(),
                     arrayfire::seq!(),
                 ];
@@ -320,11 +332,12 @@ impl Node {
         // i.e. input[r,c] == output[floor(r/stride), floor(c/stride)].
         // We nearest-neighbor upsample `output` to input size via a gather:
         // row_indices[r] = floor(r / stride), col_indices[c] = floor(c / stride)
-        let input_dims = tensor.dims();
         let out_h = output.dims()[0];
         let out_w = output.dims()[1];
         let out_c = output.dims()[2];
         let out_n = output.dims()[3];
+        let covered_h = (out_h * stride).min(input_dims[0]);
+        let covered_w = (out_w * stride).min(input_dims[1]);
 
         // row gather: for each input row r, collect output row floor(r/stride).
         // In column-major, repeat-each-element along dim0 requires:
@@ -364,17 +377,36 @@ impl Node {
             );
             arrayfire::reorder_v2(&expanded, 1, 0, Some(vec![2, 3]))
         };
-        // Crop to exact input size (in case H or W is not divisible by stride)
-        let upsampled = arrayfire::index(
+        let upsampled_covered = arrayfire::index(
             &col_expanded,
             &[
-                arrayfire::seq!(0, (input_dims[0] - 1) as i32, 1),
-                arrayfire::seq!(0, (input_dims[1] - 1) as i32, 1),
+                arrayfire::seq!(0, (covered_h - 1) as i32, 1),
+                arrayfire::seq!(0, (covered_w - 1) as i32, 1),
                 arrayfire::seq!(),
                 arrayfire::seq!(),
             ],
         );
-        let mask = arrayfire::eq(&tensor, &upsampled, false).cast::<f32>();
+        let input_covered = arrayfire::index(
+            &tensor,
+            &[
+                arrayfire::seq!(0, (covered_h - 1) as i32, 1),
+                arrayfire::seq!(0, (covered_w - 1) as i32, 1),
+                arrayfire::seq!(),
+                arrayfire::seq!(),
+            ],
+        );
+        let mask_covered = arrayfire::eq(&input_covered, &upsampled_covered, false).cast::<f32>();
+        let mut mask = arrayfire::constant(0.0f32, input_dims);
+        arrayfire::assign_seq(
+            &mut mask,
+            &[
+                arrayfire::seq!(0, (covered_h - 1) as i32, 1),
+                arrayfire::seq!(0, (covered_w - 1) as i32, 1),
+                arrayfire::seq!(),
+                arrayfire::seq!(),
+            ],
+            &mask_covered,
+        );
 
         Self::from_op(
             output,
@@ -567,123 +599,39 @@ impl Node {
                 // z = a^T  ->  da = dz^T
                 acc_grad(&self.parents[0], &arrayfire::transpose(&dz, false));
             }
-            // vibecoded gradient ; should look into it :^)
-            Some(Operation::Conv2D) => {
+            // i was having a ton of issues while implementing the built in
+            // arrayfire convolution so i should be on the lookout here :^)
+            Some(Operation::Conv2D {
+                stride,
+                padding,
+                dilation,
+            }) => {
                 let signal = self.parents[0].borrow().tensor.clone(); // [H, W, C_in, N]
                 let filter = self.parents[1].borrow().tensor.clone(); // [FH, FW, C_in, C_out]
-                let signal_dims = signal.dims();
-                let filter_dims = filter.dims();
-                let h = signal_dims[0] as i32;
-                let w = signal_dims[1] as i32;
-                let fh = filter_dims[0] as i32;
-                let fw = filter_dims[1] as i32;
-                let c_in = filter_dims[2] as i32;
-                let c_out = filter_dims[3] as i32;
-                let n_batch = signal_dims[3];
-                let mode = arrayfire::ConvMode::DEFAULT;
-                let domain = arrayfire::ConvDomain::AUTO;
-
-                // === SIGNAL GRADIENT ===
-                // d_signal[:,:,c,:] = sum_k convolve2(dz_k, flip(f_ck))
-                // convolve2 does math convolution (flips 2nd arg), so we must flip the filter
-                // to get the correct adjoint: dx = convolve2(dy, flip(w))
-                let d_signal = {
-                    let chans: Vec<Array<f32>> = (0..c_in)
-                        .map(|c| {
-                            let mut d_c = arrayfire::constant(
-                                0.0f32,
-                                arrayfire::Dim4::new(&[h as u64, w as u64, 1, n_batch]),
-                            );
-                            for k in 0..c_out {
-                                let dz_k = arrayfire::index(
-                                    &dz,
-                                    &[
-                                        arrayfire::seq!(),
-                                        arrayfire::seq!(),
-                                        arrayfire::seq!(k, k, 1),
-                                        arrayfire::seq!(),
-                                    ],
-                                );
-                                let f_ck = arrayfire::index(
-                                    &filter,
-                                    &[
-                                        arrayfire::seq!(),
-                                        arrayfire::seq!(),
-                                        arrayfire::seq!(c, c, 1),
-                                        arrayfire::seq!(k, k, 1),
-                                    ],
-                                );
-                                let f_ck_flipped = arrayfire::flip(&arrayfire::flip(&f_ck, 0), 1);
-                                d_c =
-                                    d_c + arrayfire::convolve2(&dz_k, &f_ck_flipped, mode, domain);
-                            }
-                            d_c
-                        })
-                        .collect();
-                    join_along(2, chans)
-                };
+                let stride_dims = Dim4::new(&[stride[0], stride[1], 1, 1]);
+                let padding_dims = Dim4::new(&[padding[0], padding[1], 1, 1]);
+                let dilation_dims = Dim4::new(&[dilation[0], dilation[1], 1, 1]);
+                let d_signal = arrayfire::convolve2_gradient_nn(
+                    &dz,
+                    &signal,
+                    &filter,
+                    &self.tensor,
+                    stride_dims,
+                    padding_dims,
+                    dilation_dims,
+                    ConvGradientType::DATA,
+                );
                 acc_grad(&self.parents[0], &d_signal);
-
-                // === FILTER GRADIENT ===
-                // dw[m,n,c,k] = sum_batch crop(convolve2_expand(flip(x_c), dz_k))
-                // Verified: dw[m,n] = convolve2_expand(flip(x), dz)[H-1-ch+m, W-1-cw+n]
-                let expand_mode = arrayfire::ConvMode::EXPAND;
-                let d_filter = {
-                    let k_chans: Vec<Array<f32>> = (0..c_out)
-                        .map(|k| {
-                            let dz_k = arrayfire::index(
-                                &dz,
-                                &[
-                                    arrayfire::seq!(),
-                                    arrayfire::seq!(),
-                                    arrayfire::seq!(k, k, 1),
-                                    arrayfire::seq!(),
-                                ],
-                            ); // [H,W,1,N]
-
-                            let c_chans: Vec<Array<f32>> = (0..c_in)
-                                .map(|c| {
-                                    let signal_c = arrayfire::index(
-                                        &signal,
-                                        &[
-                                            arrayfire::seq!(),
-                                            arrayfire::seq!(),
-                                            arrayfire::seq!(c, c, 1),
-                                            arrayfire::seq!(),
-                                        ],
-                                    ); // [H,W,1,N]
-
-                                    let signal_c_flipped =
-                                        arrayfire::flip(&arrayfire::flip(&signal_c, 0), 1);
-
-                                    // convolve2_expand(flip(x_c), dz_k): BATCH_SAME on dim3
-                                    let full = arrayfire::convolve2(
-                                        &signal_c_flipped,
-                                        &dz_k,
-                                        expand_mode,
-                                        domain,
-                                    ); // [2H-1, 2W-1, 1, N]
-
-                                    // Crop at (H-1-ch, W-1-cw) with size (fh, fw)
-                                    let start_h = h - 1 - (fh - 1) / 2;
-                                    let start_w = w - 1 - (fw - 1) / 2;
-                                    let cropped = arrayfire::index(
-                                        &full,
-                                        &[
-                                            arrayfire::seq!(start_h, start_h + fh - 1, 1),
-                                            arrayfire::seq!(start_w, start_w + fw - 1, 1),
-                                            arrayfire::seq!(),
-                                            arrayfire::seq!(),
-                                        ],
-                                    );
-                                    arrayfire::sum(&cropped, 3) // [fh,fw,1,1]
-                                })
-                                .collect();
-                            join_along(2, c_chans) // [fh,fw,c_in,1]
-                        })
-                        .collect();
-                    join_along(3, k_chans) // [fh,fw,c_in,c_out]
-                };
+                let d_filter = arrayfire::convolve2_gradient_nn(
+                    &dz,
+                    &signal,
+                    &filter,
+                    &self.tensor,
+                    stride_dims,
+                    padding_dims,
+                    dilation_dims,
+                    ConvGradientType::FILTER,
+                );
                 acc_grad(&self.parents[1], &d_filter);
             }
             Some(Operation::MaxPool {
@@ -697,6 +645,8 @@ impl Node {
                 let dz_w = dz.dims()[1];
                 let dz_c = dz.dims()[2];
                 let dz_n = dz.dims()[3];
+                let covered_h = (dz_h * *stride).min(parent_dims[0]);
+                let covered_w = (dz_w * *stride).min(parent_dims[1]);
                 let row_expanded = {
                     let flat = arrayfire::moddims(
                         &dz,
@@ -729,14 +679,25 @@ impl Node {
                     );
                     arrayfire::reorder_v2(&expanded, 1, 0, Some(vec![2, 3]))
                 };
-                let upsampled_dz = arrayfire::index(
+                let upsampled_covered = arrayfire::index(
                     &col_expanded,
                     &[
-                        arrayfire::seq!(0, (parent_dims[0] - 1) as i32, 1),
-                        arrayfire::seq!(0, (parent_dims[1] - 1) as i32, 1),
+                        arrayfire::seq!(0, (covered_h - 1) as i32, 1),
+                        arrayfire::seq!(0, (covered_w - 1) as i32, 1),
                         arrayfire::seq!(),
                         arrayfire::seq!(),
                     ],
+                );
+                let mut upsampled_dz = arrayfire::constant(0.0f32, parent_dims);
+                arrayfire::assign_seq(
+                    &mut upsampled_dz,
+                    &[
+                        arrayfire::seq!(0, (covered_h - 1) as i32, 1),
+                        arrayfire::seq!(0, (covered_w - 1) as i32, 1),
+                        arrayfire::seq!(),
+                        arrayfire::seq!(),
+                    ],
+                    &upsampled_covered,
                 );
                 let da = upsampled_dz * mask;
                 acc_grad(&self.parents[0], &da);
@@ -765,13 +726,6 @@ impl Node {
             None => {}
         }
     }
-}
-
-fn join_along(dim: i32, arrays: Vec<Array<f32>>) -> Array<f32> {
-    arrays
-        .into_iter()
-        .reduce(|acc, a| arrayfire::join(dim, &acc, &a))
-        .expect("join_along: empty array list")
 }
 
 fn acc_grad(node: &NodeRef, contribution: &Array<f32>) {
@@ -880,7 +834,7 @@ mod tests {
             true,
         );
 
-        let output = Node::conv2d(&input, &filter);
+        let output = Node::conv2d(&input, &filter, [1, 1], [0, 0], [1, 1]);
 
         assert_all_close(output.borrow().tensor(), &expected_output, 1e-5);
     }
@@ -901,7 +855,7 @@ mod tests {
         // Analytical gradients via backward
         let x = Node::leaf(x_arr.clone(), true);
         let w = Node::leaf(w_arr.clone(), true);
-        let out = Node::conv2d(&x, &w);
+        let out = Node::conv2d(&x, &w, [1, 1], [0, 0], [1, 1]);
         let loss = Node::sum(&out);
         backward(loss);
 
@@ -915,14 +869,14 @@ mod tests {
             x_plus[idx] += eps;
             let xp = Node::leaf(Array::new(&x_plus, dim4!(3, 3, 1, 1)), false);
             let wp = Node::leaf(w_arr.clone(), false);
-            let out_p = Node::conv2d(&xp, &wp);
+            let out_p = Node::conv2d(&xp, &wp, [1, 1], [0, 0], [1, 1]);
             let (lp, _) = arrayfire::sum_all(out_p.borrow().tensor());
 
             let mut x_minus = x_data.clone();
             x_minus[idx] -= eps;
             let xm = Node::leaf(Array::new(&x_minus, dim4!(3, 3, 1, 1)), false);
             let wm = Node::leaf(w_arr.clone(), false);
-            let out_m = Node::conv2d(&xm, &wm);
+            let out_m = Node::conv2d(&xm, &wm, [1, 1], [0, 0], [1, 1]);
             let (lm, _) = arrayfire::sum_all(out_m.borrow().tensor());
 
             num_dx[idx] = (lp - lm) / (2.0 * eps);
@@ -937,14 +891,14 @@ mod tests {
             w_plus[idx] += eps;
             let xp = Node::leaf(x_arr.clone(), false);
             let wp = Node::leaf(Array::new(&w_plus, dim4!(3, 3, 1, 1)), false);
-            let out_p = Node::conv2d(&xp, &wp);
+            let out_p = Node::conv2d(&xp, &wp, [1, 1], [0, 0], [1, 1]);
             let (lp, _) = arrayfire::sum_all(out_p.borrow().tensor());
 
             let mut w_minus = w_data.clone();
             w_minus[idx] -= eps;
             let xm = Node::leaf(x_arr.clone(), false);
             let wm = Node::leaf(Array::new(&w_minus, dim4!(3, 3, 1, 1)), false);
-            let out_m = Node::conv2d(&xm, &wm);
+            let out_m = Node::conv2d(&xm, &wm, [1, 1], [0, 0], [1, 1]);
             let (lm, _) = arrayfire::sum_all(out_m.borrow().tensor());
 
             num_dw[idx] = (lp - lm) / (2.0 * eps);

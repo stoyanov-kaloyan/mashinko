@@ -1,9 +1,12 @@
 use crate::af_tensor::{Node, NodeRef};
 use arrayfire::{Dim4, randu};
+use std::cell::RefCell;
 
 pub struct Linear {
-    pub weight: NodeRef,
-    pub bias: NodeRef,
+    in_features: Option<usize>,
+    out_features: usize,
+    weight: RefCell<Option<NodeRef>>,
+    bias: RefCell<Option<NodeRef>>,
     pub name: Option<String>,
 }
 
@@ -62,18 +65,63 @@ pub trait HasParameters {
 
 impl Linear {
     pub fn new(in_features: usize, out_features: usize) -> Self {
-        let w_dims = Dim4::new(&[in_features as u64, out_features as u64, 1, 1]);
-        let b_dims = Dim4::new(&[1, out_features as u64, 1, 1]);
-
-        let scale = (2.0f32 / in_features as f32).sqrt();
-        let w = Node::leaf((randu::<f32>(w_dims) - 0.5f32) * (2.0f32 * scale), true);
-        let b = Node::leaf(arrayfire::constant(0.0f32, b_dims), true);
-
         Self {
-            weight: w,
-            bias: b,
+            in_features: Some(in_features),
+            out_features,
+            weight: RefCell::new(Some(Self::init_weight(in_features, out_features))),
+            bias: RefCell::new(Some(Self::init_bias(out_features))),
             name: None,
         }
+    }
+
+    pub fn lazy(out_features: usize) -> Self {
+        Self {
+            in_features: None,
+            out_features,
+            weight: RefCell::new(None),
+            bias: RefCell::new(None),
+            name: None,
+        }
+    }
+
+    pub fn weight(&self) -> Option<NodeRef> {
+        self.weight.borrow().clone()
+    }
+
+    pub fn bias(&self) -> Option<NodeRef> {
+        self.bias.borrow().clone()
+    }
+
+    fn init_weight(in_features: usize, out_features: usize) -> NodeRef {
+        let w_dims = Dim4::new(&[in_features as u64, out_features as u64, 1, 1]);
+        let scale = (2.0f32 / in_features as f32).sqrt();
+        Node::leaf((randu::<f32>(w_dims) - 0.5f32) * (2.0f32 * scale), true)
+    }
+
+    fn init_bias(out_features: usize) -> NodeRef {
+        let b_dims = Dim4::new(&[1, out_features as u64, 1, 1]);
+        Node::leaf(arrayfire::constant(0.0f32, b_dims), true)
+    }
+
+    fn ensure_initialized(&self, input: &NodeRef) {
+        let inferred_in_features = input.borrow().tensor().dims()[1] as usize;
+
+        if self.weight.borrow().is_some() {
+            if let Some(expected) = self.in_features {
+                assert_eq!(
+                    inferred_in_features, expected,
+                    "Linear expected {} input features, got {}",
+                    expected, inferred_in_features
+                );
+            }
+            return;
+        }
+
+        let weight = Self::init_weight(inferred_in_features, self.out_features);
+        let bias = Self::init_bias(self.out_features);
+
+        *self.weight.borrow_mut() = Some(weight);
+        *self.bias.borrow_mut() = Some(bias);
     }
 }
 
@@ -161,6 +209,10 @@ impl Flatten {
 impl Permute {
     pub fn new(perm: [u64; 4]) -> Self {
         Self { perm, name: None }
+    }
+
+    pub fn nhwc_to_hwcn() -> Self {
+        Self::new([1, 2, 3, 0])
     }
 }
 
@@ -254,10 +306,16 @@ impl Layer {
         };
 
         match self {
-            Layer::Linear(l) => vec![
-                (format!("{prefix}.weight"), l.weight.clone()),
-                (format!("{prefix}.bias"), l.bias.clone()),
-            ],
+            Layer::Linear(l) => {
+                let mut params = Vec::new();
+                if let Some(weight) = l.weight() {
+                    params.push((format!("{prefix}.weight"), weight));
+                }
+                if let Some(bias) = l.bias() {
+                    params.push((format!("{prefix}.bias"), bias));
+                }
+                params
+            }
             Layer::Conv2D(c) => vec![
                 (format!("{prefix}.weight"), c.weight.clone()),
                 (format!("{prefix}.bias"), c.bias.clone()),
@@ -292,14 +350,28 @@ impl Sequential {
 
 impl HasParameters for Linear {
     fn forward(&self, input: NodeRef) -> NodeRef {
-        let matmul_out = Node::matmul(&input, &self.weight);
+        self.ensure_initialized(&input);
+        let weight = self
+            .weight()
+            .expect("Linear::forward: weight should be initialized");
+        let bias = self
+            .bias()
+            .expect("Linear::forward: bias should be initialized");
+        let matmul_out = Node::matmul(&input, &weight);
         // might be more appropriate here but needs diagnosing
         // Node::matmul(&input, &Node::transpose(&self.weight))
-        Node::add(&matmul_out, &self.bias)
+        Node::add(&matmul_out, &bias)
     }
 
     fn parameters(&self) -> Vec<NodeRef> {
-        vec![self.weight.clone(), self.bias.clone()]
+        let mut params = Vec::new();
+        if let Some(weight) = self.weight() {
+            params.push(weight);
+        }
+        if let Some(bias) = self.bias() {
+            params.push(bias);
+        }
+        params
     }
 }
 
@@ -333,7 +405,26 @@ impl HasParameters for MLP {
 
 impl HasParameters for Conv2D {
     fn forward(&self, input: NodeRef) -> NodeRef {
-        let conv_out = Node::conv2d(&input, &self.weight);
+        let conv_out = Node::conv2d(
+            &input,
+            &self.weight,
+            self.stride,
+            self.padding,
+            self.dilation,
+        );
+        let conv_dims = conv_out.borrow().tensor().dims();
+        let bias_dims = self.bias.borrow().tensor().dims();
+        let conv_out = if conv_dims[2] == bias_dims[2] {
+            conv_out
+        } else if conv_dims[3] == bias_dims[2] {
+            Node::reorder(&conv_out, [0, 1, 3, 2])
+        } else {
+            panic!(
+                "Conv2D output channels do not match bias dims: conv={:?}, bias={:?}",
+                conv_dims, bias_dims
+            );
+        };
+
         Node::add(&conv_out, &self.bias)
     }
 
@@ -406,7 +497,8 @@ macro_rules! sequential {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conv2D, Layer, Linear, MaxPool, ReLU, Sequential};
+    use super::{Conv2D, Layer, Linear, MaxPool, Node, Permute, ReLU, Sequential};
+    use arrayfire::Dim4;
     use std::rc::Rc;
 
     #[test]
@@ -436,8 +528,8 @@ mod tests {
     #[test]
     fn sequential_named_parameters_use_hierarchical_names() {
         let linear = Linear::new(4, 8);
-        let linear_weight = linear.weight.clone();
-        let linear_bias = linear.bias.clone();
+        let linear_weight = linear.weight().expect("linear weight should be initialized");
+        let linear_bias = linear.bias().expect("linear bias should be initialized");
 
         let conv = Conv2D::new(1, 2, 3);
         let conv_weight = conv.weight.clone();
@@ -460,5 +552,26 @@ mod tests {
         assert!(Rc::ptr_eq(&named_params[2].1, &conv_weight));
         assert_eq!(named_params[3].0, "layers.2.bias");
         assert!(Rc::ptr_eq(&named_params[3].1, &conv_bias));
+    }
+
+    #[test]
+    fn lazy_linear_initializes_from_first_input_shape() {
+        let linear = Linear::lazy(3);
+        assert!(linear.weight().is_none());
+        assert!(linear.bias().is_none());
+
+        let input = Node::leaf(arrayfire::constant(0.0f32, Dim4::new(&[5, 7, 1, 1])), false);
+        let _ = linear.forward(input);
+
+        let weight = linear.weight().expect("lazy linear should initialize weight");
+        let bias = linear.bias().expect("lazy linear should initialize bias");
+        assert_eq!(weight.borrow().tensor().dims(), Dim4::new(&[7, 3, 1, 1]));
+        assert_eq!(bias.borrow().tensor().dims(), Dim4::new(&[1, 3, 1, 1]));
+    }
+
+    #[test]
+    fn permute_semantic_helper_uses_expected_axis_order() {
+        let permute = Permute::nhwc_to_hwcn();
+        assert_eq!(permute.perm, [1, 2, 3, 0]);
     }
 }
