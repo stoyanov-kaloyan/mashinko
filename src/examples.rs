@@ -4,7 +4,7 @@ use crate::{
     engine::backward,
     layer::{Conv2D, Flatten, HasParameters, Linear, MLP, MaxPool, Permute, ReLU, Sequential},
     loss::{cross_entropy, mse},
-    optimizer::{Optimizer, SGD},
+    optimizer::{Adam, Optimizer, SGD},
     sequential,
     utils::{argmax, one_hot_encode_host, parse_idx_file, parse_idx_file_host},
 };
@@ -46,9 +46,7 @@ pub fn mnist_example() {
         Linear::lazy(10),
     ];
 
-    // Compensate for smaller effective step under averaged CE gradients.
-    let mut optimizer = SGD { lr: 0.05 };
-
+    let mut optimizer = Adam::new(0.01, 0.9, 0.999, 1e-8);
     println!("Training MNIST with CNN\n");
 
     let num_epochs = 5;
@@ -192,10 +190,18 @@ pub fn linear_example() {
     af_print!("y_pred", y_pred.borrow().tensor());
     af_print!(
         "weight (expect ~3)",
-        model.weight().expect("linear example weight missing").borrow().tensor()
+        model
+            .weight()
+            .expect("linear example weight missing")
+            .borrow()
+            .tensor()
     );
     af_print!(
         "bias   (expect ~1)",
-        model.bias().expect("linear example bias missing").borrow().tensor()
+        model
+            .bias()
+            .expect("linear example bias missing")
+            .borrow()
+            .tensor()
     );
 }

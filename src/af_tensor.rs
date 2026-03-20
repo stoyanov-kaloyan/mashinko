@@ -397,12 +397,23 @@ impl Node {
         );
         let mask_covered = arrayfire::eq(&input_covered, &upsampled_covered, false).cast::<f32>();
         let mut mask = arrayfire::constant(0.0f32, input_dims);
-        arrayfire::assign_seq(
-            &mut mask,
-            &[
+        let mask_ndims = input_dims.ndims();
+        let mask_seqs = if mask_ndims <= 2 {
+            vec![
                 arrayfire::seq!(0, (covered_h - 1) as i32, 1),
                 arrayfire::seq!(0, (covered_w - 1) as i32, 1),
-            ],
+            ]
+        } else {
+            vec![
+                arrayfire::seq!(0, (covered_h - 1) as i32, 1),
+                arrayfire::seq!(0, (covered_w - 1) as i32, 1),
+                arrayfire::seq!(),
+                arrayfire::seq!(),
+            ]
+        };
+        arrayfire::assign_seq(
+            &mut mask,
+            &mask_seqs,
             &mask_covered,
         );
 
@@ -687,12 +698,23 @@ impl Node {
                     ],
                 );
                 let mut upsampled_dz = arrayfire::constant(0.0f32, parent_dims);
-                arrayfire::assign_seq(
-                    &mut upsampled_dz,
-                    &[
+                let dz_ndims = parent_dims.ndims();
+                let dz_seqs = if dz_ndims <= 2 {
+                    vec![
                         arrayfire::seq!(0, (covered_h - 1) as i32, 1),
                         arrayfire::seq!(0, (covered_w - 1) as i32, 1),
-                    ],
+                    ]
+                } else {
+                    vec![
+                        arrayfire::seq!(0, (covered_h - 1) as i32, 1),
+                        arrayfire::seq!(0, (covered_w - 1) as i32, 1),
+                        arrayfire::seq!(),
+                        arrayfire::seq!(),
+                    ]
+                };
+                arrayfire::assign_seq(
+                    &mut upsampled_dz,
+                    &dz_seqs,
                     &upsampled_covered,
                 );
                 let da = upsampled_dz * mask;
