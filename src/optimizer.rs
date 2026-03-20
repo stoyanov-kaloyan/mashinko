@@ -32,3 +32,47 @@ impl Optimizer for SGD {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Optimizer;
+    use crate::utils::assert_all_close;
+
+    #[test]
+    fn test_sgd() {
+        let mut optimizer = super::SGD { lr: 0.1 };
+        let param = super::Node::leaf(
+            arrayfire::constant(1.0_f32, arrayfire::Dim4::new(&[1, 1, 1, 1])),
+            true,
+        );
+        param.borrow_mut().set_grad(
+            super::Node::constant(0.5_f32, arrayfire::Dim4::new(&[1, 1, 1, 1]))
+                .borrow()
+                .tensor()
+                .clone(),
+        );
+        optimizer.step(&[param.clone()]);
+        let updated_value = param.borrow().tensor().clone();
+        let expected_value = arrayfire::constant(0.95_f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        assert_all_close(&updated_value, &expected_value, 1e-5);
+    }
+
+    #[test]
+    fn test_zero_grad() {
+        let mut optimizer = super::SGD { lr: 0.1 };
+        let param = super::Node::leaf(
+            arrayfire::constant(1.0_f32, arrayfire::Dim4::new(&[1, 1, 1, 1])),
+            true,
+        );
+        param.borrow_mut().set_grad(
+            super::Node::constant(0.5_f32, arrayfire::Dim4::new(&[1, 1, 1, 1]))
+                .borrow()
+                .tensor()
+                .clone(),
+        );
+        optimizer.zero_grad(&[param.clone()]);
+        let zero_grad = param.borrow().grad().unwrap().clone();
+        let expected_zero_grad = arrayfire::constant(0.0_f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        assert_all_close(&zero_grad, &expected_zero_grad, 1e-5);
+    }
+}
