@@ -1,5 +1,6 @@
 use arrayfire::{Array, MatProp, matmul};
 use std::cell::RefCell;
+use std::ops::Mul;
 use std::rc::Rc;
 
 // TODO: figure out how to do batching
@@ -27,6 +28,11 @@ pub enum Operation {
     CrossEntropy {
         probs: Array<f32>,
         target: Array<f32>,
+    },
+    BinaryCrossEntropyWithLogits {
+        probs: Array<f32>,
+        target: Array<f32>,
+        scale: f32,
     },
     Conv2D,
     MaxPool {
@@ -186,9 +192,9 @@ impl Node {
         Self::from_op(s, Operation::Softmax, vec![a.clone()], true)
     }
 
-    /// Stable categorical cross-entropy from raw logits.
+    /// Internal categorical cross-entropy from raw logits.
     /// `pred` and `target` are expected to have shape [batch, classes, 1, 1].
-    pub fn cross_entropy(pred: &NodeRef, target: &NodeRef) -> NodeRef {
+    pub(crate) fn cross_entropy_with_logits(pred: &NodeRef, target: &NodeRef) -> NodeRef {
         let logits = pred.borrow().tensor().clone();
         let target_tensor = target.borrow().tensor().clone();
         let batch = logits.dims()[0] as f32;
@@ -214,6 +220,34 @@ impl Node {
             Operation::CrossEntropy {
                 probs,
                 target: target_tensor,
+            },
+            vec![pred.clone()],
+            true,
+        )
+    }
+
+    /// Internal binary cross-entropy from raw logits.
+    /// `pred` and `target` are expected to have the same shape.
+    pub(crate) fn binary_cross_entropy_with_logits(pred: &NodeRef, target: &NodeRef) -> NodeRef {
+        let logits = pred.borrow().tensor().clone();
+        let target_tensor = target.borrow().tensor().clone();
+        let abs_logits = arrayfire::abs(&logits);
+        let zeros = arrayfire::constant(0.0f32, logits.dims());
+        let max_logits = arrayfire::maxof(&logits, &zeros, false);
+        let stable_term = arrayfire::log1p(&arrayfire::exp(&(&abs_logits.mul(-1))));
+        let per_elem = &max_logits - &(&logits * &target_tensor) + &stable_term;
+        let num_elements = logits.elements() as f32;
+        let loss_val = arrayfire::sum_all(&per_elem).0 as f32 / num_elements;
+        let loss = Array::new(&[loss_val], arrayfire::Dim4::new(&[1, 1, 1, 1]));
+
+        let probs = 1.0f32 / (1.0f32 + arrayfire::exp(&(&logits.mul(-1))));
+
+        Self::from_op(
+            loss,
+            Operation::BinaryCrossEntropyWithLogits {
+                probs,
+                target: target_tensor,
+                scale: 1.0f32 / num_elements,
             },
             vec![pred.clone()],
             true,
@@ -502,6 +536,15 @@ impl Node {
                 let da = (probs - target) * &scale * &dz;
                 acc_grad(&self.parents[0], &da);
             }
+            Some(Operation::BinaryCrossEntropyWithLogits {
+                probs,
+                target,
+                scale,
+            }) => {
+                let scale_tensor = arrayfire::constant(*scale, probs.dims());
+                let da = (probs - target) * &scale_tensor * &dz;
+                acc_grad(&self.parents[0], &da);
+            }
             Some(Operation::Log) => {
                 // log(x) ->  da = dz / x
                 let x = self.parents[0].borrow().tensor.clone();
@@ -757,7 +800,7 @@ fn acc_grad(node: &NodeRef, contribution: &Array<f32>) {
 
 #[cfg(test)]
 mod tests {
-    use arrayfire::{Array, af_print, dim4, seq};
+    use arrayfire::{Array, af_print, dim4};
 
     use crate::{af_tensor::Node, utils::assert_all_close};
 

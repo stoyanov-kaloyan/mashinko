@@ -41,7 +41,7 @@ pub fn mnist_example() {
 
     // Large batches keep GPU busier but shrink gradient magnitude (we average by batch),
     // which made updates too small in practice for this handcrafted backend.
-    let data_loader = crate::data::DataLoader::new(&dataset, 1024, true);
+    let data_loader = crate::data::DataLoader::new(&dataset, 2048, true);
 
     let model = sequential![
         Permute::new([1, 2, 3, 0]),
