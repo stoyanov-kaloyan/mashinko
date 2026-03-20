@@ -1,18 +1,18 @@
 use crate::{
     af_tensor::Node,
-    data::{HostDataLoader, HostDataset},
+    data::{DataLoader, Dataset},
     engine::backward,
     layer::{Conv2D, Flatten, HasParameters, Linear, MLP, MaxPool, Permute, ReLU, Sequential},
     loss::{cross_entropy, mse},
     optimizer::{Optimizer, SGD},
     sequential,
-    utils::{argmax, one_hot_encode_host, parse_idx_file_host},
+    utils::{argmax, one_hot_encode_host, parse_idx_file, parse_idx_file_host},
 };
 use arrayfire::{Dim4, af_print};
 
 pub fn mnist_example() {
-    let (train_images, train_image_dims) =
-        parse_idx_file_host("datasets/mnist/train-images.idx3-ubyte", true);
+    let train_images = parse_idx_file("datasets/mnist/train-images.idx3-ubyte", true);
+    let train_image_dims = train_images.dims();
     let (train_labels, train_label_dims) =
         parse_idx_file_host("datasets/mnist/train-labels.idx1-ubyte", false);
     eprintln!("train_images dims: {:?}", train_image_dims);
@@ -23,17 +23,16 @@ pub fn mnist_example() {
     // Permute layer in model converts to (28, 28, 1, batch) for conv ops
     let n_samples = train_image_dims[0];
     let labels_onehot = one_hot_encode_host(&train_labels, n_samples as usize, 10);
+    let labels_onehot = arrayfire::Array::new(&labels_onehot, Dim4::new(&[n_samples, 10, 1, 1]));
 
-    let dataset = HostDataset::new(
-        train_images,
-        train_image_dims,
-        labels_onehot,
-        Dim4::new(&[n_samples, 10, 1, 1]),
+    let dataset = Dataset::new(
+        Node::leaf(train_images, false),
+        Node::leaf(labels_onehot, false),
     );
 
     // Large batches keep GPU busier but shrink gradient magnitude (we average by batch),
     // which made updates too small in practice for this handcrafted backend.
-    let data_loader = HostDataLoader::new(&dataset, 2048, true);
+    let data_loader = DataLoader::new(&dataset, 2048, true);
 
     let model = sequential![
         Permute::nhwc_to_hwcn(),
@@ -85,7 +84,7 @@ pub fn mnist_example() {
 
     println!("\n Validation on training set (for demonstration) \n");
     let accuracy = {
-        let eval_loader = HostDataLoader::new(&dataset, 1024, false);
+        let eval_loader = DataLoader::new(&dataset, 1024, false);
         let mut num_correct = 0.0f32;
 
         for (x_batch, y_batch) in &eval_loader {

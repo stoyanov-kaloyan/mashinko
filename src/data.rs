@@ -52,37 +52,11 @@ impl DataLoader {
         let n_samples = x_tensor.dims()[0] as usize;
 
         let (x_data, y_data) = if self.shuffle {
-            let x_dims = x_tensor.dims();
-            let y_dims = y_tensor.dims();
-
-            let x_elements = x_tensor.elements();
-            let y_elements = y_tensor.elements();
-            let x_stride = x_elements / n_samples;
-            let y_stride = y_elements / n_samples;
-
-            let mut x_host = vec![0.0f32; x_elements];
-            let mut y_host = vec![0.0f32; y_elements];
-            x_tensor.host(&mut x_host);
-            y_tensor.host(&mut y_host);
-
-            let mut perm: Vec<usize> = (0..n_samples).collect();
-            perm.shuffle(&mut rand::rng());
-
-            // Reorder rows according to permutation
-            let mut x_shuffled = vec![0.0f32; x_elements];
-            let mut y_shuffled = vec![0.0f32; y_elements];
-            for (new_idx, &old_idx) in perm.iter().enumerate() {
-                for col in 0..x_stride {
-                    x_shuffled[new_idx + col * n_samples] = x_host[old_idx + col * n_samples];
-                }
-                for col in 0..y_stride {
-                    y_shuffled[new_idx + col * n_samples] = y_host[old_idx + col * n_samples];
-                }
-            }
-
+            let shuffle_keys = af::randu::<f32>(Dim4::new(&[n_samples as u64, 1, 1, 1]));
+            let (_, permutation) = af::sort_index(&shuffle_keys, 0, true);
             (
-                Array::new(&x_shuffled, x_dims),
-                Array::new(&y_shuffled, y_dims),
+                af::lookup(&x_tensor, &permutation, 0),
+                af::lookup(&y_tensor, &permutation, 0),
             )
         } else {
             (x_tensor, y_tensor)
