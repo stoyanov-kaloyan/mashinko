@@ -498,6 +498,7 @@ macro_rules! sequential {
 #[cfg(test)]
 mod tests {
     use super::{Conv2D, Layer, Linear, MaxPool, Node, Permute, ReLU, Sequential};
+    use crate::layer::HasParameters;
     use arrayfire::Dim4;
     use std::rc::Rc;
 

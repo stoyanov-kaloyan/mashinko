@@ -402,8 +402,6 @@ impl Node {
             &[
                 arrayfire::seq!(0, (covered_h - 1) as i32, 1),
                 arrayfire::seq!(0, (covered_w - 1) as i32, 1),
-                arrayfire::seq!(),
-                arrayfire::seq!(),
             ],
             &mask_covered,
         );
@@ -694,8 +692,6 @@ impl Node {
                     &[
                         arrayfire::seq!(0, (covered_h - 1) as i32, 1),
                         arrayfire::seq!(0, (covered_w - 1) as i32, 1),
-                        arrayfire::seq!(),
-                        arrayfire::seq!(),
                     ],
                     &upsampled_covered,
                 );
