@@ -6,6 +6,7 @@ use crate::{
     loss::{cross_entropy, mse},
     optimizer::{Adam, Optimizer, SGD},
     sequential,
+    ui::{run_training_ui, with_ui_state},
     utils::{
         argmax, one_hot_encode_host, parse_cifar10_batch_host, parse_cifar10_train_host,
         parse_idx_file, parse_idx_file_host,
@@ -218,106 +219,150 @@ pub fn linear_example() {
 }
 
 pub fn cifar10_vgg_example() {
-    let (train_images_host, train_image_dims, train_labels_host, _) =
-        parse_cifar10_train_host("datasets/cifar", true);
-    let (test_images_host, test_image_dims, test_labels_host, _) =
-        parse_cifar10_batch_host("datasets/cifar/test_batch.bin", true);
+    run_training_ui("CIFAR-10 VGG", move |ui_state| {
+        with_ui_state(&ui_state, |state| {
+            state.status = "loading dataset".to_owned();
+        });
 
-    eprintln!("cifar train_images dims: {:?}", train_image_dims);
-    eprintln!("cifar test_images dims: {:?}", test_image_dims);
+        let (train_images_host, train_image_dims, train_labels_host, _) =
+            parse_cifar10_train_host("datasets/cifar", true);
+        let (test_images_host, test_image_dims, test_labels_host, _) =
+            parse_cifar10_batch_host("datasets/cifar/test_batch.bin", true);
 
-    let n_train = train_image_dims[0];
-    let n_test = test_image_dims[0];
+        eprintln!("cifar train_images dims: {:?}", train_image_dims);
+        eprintln!("cifar test_images dims: {:?}", test_image_dims);
 
-    let train_labels_onehot = one_hot_encode_host(&train_labels_host, n_train as usize, 10);
-    let test_labels_onehot = one_hot_encode_host(&test_labels_host, n_test as usize, 10);
+        let n_train = train_image_dims[0];
+        let n_test = test_image_dims[0];
 
-    let train_dataset = Dataset::new(
-        Node::leaf(
-            arrayfire::Array::new(&train_images_host, train_image_dims),
-            false,
-        ),
-        Node::leaf(
-            arrayfire::Array::new(&train_labels_onehot, Dim4::new(&[n_train, 10, 1, 1])),
-            false,
-        ),
-    );
-    let test_dataset = Dataset::new(
-        Node::leaf(
-            arrayfire::Array::new(&test_images_host, test_image_dims),
-            false,
-        ),
-        Node::leaf(
-            arrayfire::Array::new(&test_labels_onehot, Dim4::new(&[n_test, 10, 1, 1])),
-            false,
-        ),
-    );
+        let train_labels_onehot = one_hot_encode_host(&train_labels_host, n_train as usize, 10);
+        let test_labels_onehot = one_hot_encode_host(&test_labels_host, n_test as usize, 10);
 
-    let train_loader = DataLoader::new(&train_dataset, 512, true);
-    let test_loader = DataLoader::new(&test_dataset, 512, false);
+        let train_dataset = Dataset::new(
+            Node::leaf(
+                arrayfire::Array::new(&train_images_host, train_image_dims),
+                false,
+            ),
+            Node::leaf(
+                arrayfire::Array::new(&train_labels_onehot, Dim4::new(&[n_train, 10, 1, 1])),
+                false,
+            ),
+        );
+        let test_dataset = Dataset::new(
+            Node::leaf(
+                arrayfire::Array::new(&test_images_host, test_image_dims),
+                false,
+            ),
+            Node::leaf(
+                arrayfire::Array::new(&test_labels_onehot, Dim4::new(&[n_test, 10, 1, 1])),
+                false,
+            ),
+        );
 
-    let model = sequential![
-        Permute::nhwc_to_hwcn(),
-        Conv2D::new(3, 32, 3),
-        ReLU::new(),
-        Conv2D::new(32, 32, 3),
-        ReLU::new(),
-        MaxPool::new(2, 2),
-        Conv2D::new(32, 64, 3),
-        ReLU::new(),
-        Conv2D::new(64, 64, 3),
-        ReLU::new(),
-        MaxPool::new(2, 2),
-        Conv2D::new(64, 128, 3),
-        ReLU::new(),
-        MaxPool::new(2, 2),
-        Flatten::new(),
-        Linear::lazy(256),
-        ReLU::new(),
-        Linear::new(256, 10),
-    ];
+        let train_loader = DataLoader::new(&train_dataset, 512, true);
+        let test_loader = DataLoader::new(&test_dataset, 512, false);
+        let total_train_batches = train_loader.len();
 
-    let mut optimizer = Adam::new(0.001, 0.9, 0.999, 1e-8);
-    println!("Training CIFAR-10 with VGG-style CNN\n");
-    let params = model.parameters();
+        let model = sequential![
+            Permute::nhwc_to_hwcn(),
+            Conv2D::new(3, 32, 3),
+            ReLU::new(),
+            Conv2D::new(32, 32, 3),
+            ReLU::new(),
+            MaxPool::new(2, 2),
+            Conv2D::new(32, 64, 3),
+            ReLU::new(),
+            Conv2D::new(64, 64, 3),
+            ReLU::new(),
+            MaxPool::new(2, 2),
+            Conv2D::new(64, 128, 3),
+            ReLU::new(),
+            MaxPool::new(2, 2),
+            Flatten::new(),
+            Linear::lazy(256),
+            ReLU::new(),
+            Linear::new(256, 10),
+        ];
 
-    let num_epochs = 2;
-    for epoch in 0..num_epochs {
-        let mut epoch_loss: Option<arrayfire::Array<f32>> = None;
-        let mut batch_count = 0usize;
+        let mut optimizer = Adam::new(0.001, 0.9, 0.999, 1e-8);
+        println!("Training CIFAR-10 with VGG-style CNN\n");
+        let params = model.parameters();
 
-        for (x_batch, y_batch) in &train_loader {
-            let y_pred = model.forward(x_batch);
-            let loss = cross_entropy(&y_pred, &y_batch);
-            backward(loss.clone());
-            let loss_tensor = loss.borrow().tensor().clone();
-            epoch_loss = Some(match epoch_loss {
-                Some(acc) => acc + &loss_tensor,
-                None => loss_tensor,
+        let num_epochs = 2;
+        with_ui_state(&ui_state, |state| {
+            state.status = "training".to_owned();
+            state.running = true;
+            state.total_epochs = num_epochs;
+            state.total_batches = total_train_batches;
+            state.epoch = 0;
+            state.batch = 0;
+        });
+
+        for epoch in 0..num_epochs {
+            let mut epoch_loss: Option<arrayfire::Array<f32>> = None;
+            let mut batch_count = 0usize;
+
+            for (x_batch, y_batch) in &train_loader {
+                let y_pred = model.forward(x_batch);
+                let loss = cross_entropy(&y_pred, &y_batch);
+                backward(loss.clone());
+                let loss_tensor = loss.borrow().tensor().clone();
+                let current_loss = arrayfire::sum_all(&loss_tensor).0 as f32;
+                epoch_loss = Some(match epoch_loss {
+                    Some(acc) => acc + &loss_tensor,
+                    None => loss_tensor,
+                });
+                batch_count += 1;
+
+                with_ui_state(&ui_state, |state| {
+                    state.epoch = epoch + 1;
+                    state.batch = batch_count;
+                    state.current_loss = current_loss;
+                });
+
+                optimizer.step(&params);
+                optimizer.zero_grad(&params);
+            }
+
+            let avg_loss = if let Some(loss_acc) = epoch_loss {
+                arrayfire::sum_all(&loss_acc).0 as f32 / batch_count as f32
+            } else {
+                0.0f32
+            };
+            with_ui_state(&ui_state, |state| {
+                state.avg_loss = avg_loss;
+                state.loss_history.push(avg_loss);
+                state.status = format!("finished epoch {}/{}", epoch + 1, num_epochs);
             });
-            batch_count += 1;
-
-            optimizer.step(&params);
-            optimizer.zero_grad(&params);
+            println!("Epoch {:>2} | Avg Loss: {:.6}", epoch + 1, avg_loss);
         }
 
-        let avg_loss = if let Some(loss_acc) = epoch_loss {
-            arrayfire::sum_all(&loss_acc).0 as f32 / batch_count as f32
-        } else {
-            0.0f32
-        };
-        println!("Epoch {:>2} | Avg Loss: {:.6}", epoch + 1, avg_loss);
-    }
+        with_ui_state(&ui_state, |state| {
+            state.status = "evaluating".to_owned();
+            state.batch = 0;
+            state.total_batches = test_loader.len();
+        });
 
-    let mut num_correct = 0.0f32;
-    for (x_batch, y_batch) in &test_loader {
-        let y_pred = model.forward(x_batch);
-        let predicted_labels = argmax(y_pred.borrow().tensor());
-        let true_labels = argmax(y_batch.borrow().tensor());
-        let correct = arrayfire::eq(&predicted_labels, &true_labels, false).cast::<f32>();
-        let (batch_correct, _) = arrayfire::sum_all(&correct);
-        num_correct += batch_correct;
-    }
-    let test_acc = num_correct / n_test as f32;
-    println!("CIFAR-10 Test Accuracy: {:.6}", test_acc);
+        let mut num_correct = 0.0f32;
+        let mut eval_batch = 0usize;
+        for (x_batch, y_batch) in &test_loader {
+            let y_pred = model.forward(x_batch);
+            let predicted_labels = argmax(y_pred.borrow().tensor());
+            let true_labels = argmax(y_batch.borrow().tensor());
+            let correct = arrayfire::eq(&predicted_labels, &true_labels, false).cast::<f32>();
+            let (batch_correct, _) = arrayfire::sum_all(&correct);
+            num_correct += batch_correct;
+            eval_batch += 1;
+            with_ui_state(&ui_state, |state| {
+                state.batch = eval_batch;
+            });
+        }
+        let test_acc = num_correct / n_test as f32;
+        with_ui_state(&ui_state, |state| {
+            state.test_accuracy = Some(test_acc);
+            state.running = false;
+            state.status = "done".to_owned();
+        });
+        println!("CIFAR-10 Test Accuracy: {:.6}", test_acc);
+    });
 }

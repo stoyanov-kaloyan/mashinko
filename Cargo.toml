@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 arrayfire = "3.8.0"
+eframe = "0.33.3"
+egui = "0.33.3"
 rand = "0.10.0"
 
 [profile.profiling]
