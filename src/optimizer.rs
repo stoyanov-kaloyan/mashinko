@@ -36,9 +36,8 @@ impl Optimizer for SGD {
 
     fn zero_grad(&mut self, parameters: &[NodeRef]) {
         for param in parameters {
-            let zero_tensor = Node::constant(0.0_f32, param.borrow().tensor().dims());
             let mut p = param.borrow_mut();
-            p.set_grad(zero_tensor.borrow().tensor().clone());
+            p.clear_grad();
         }
     }
 }
@@ -86,9 +85,8 @@ impl Optimizer for Adam {
 
     fn zero_grad(&mut self, parameters: &[NodeRef]) {
         for param in parameters {
-            let zero_tensor = Node::constant(0.0_f32, param.borrow().tensor().dims());
             let mut p = param.borrow_mut();
-            p.set_grad(zero_tensor.borrow().tensor().clone());
+            p.clear_grad();
         }
     }
 }
@@ -151,9 +149,7 @@ mod tests {
                 .clone(),
         );
         optimizer.zero_grad(&[param.clone()]);
-        let zero_grad = param.borrow().grad().unwrap().clone();
-        let expected_zero_grad = arrayfire::constant(0.0_f32, arrayfire::Dim4::new(&[1, 1, 1, 1]));
-        assert_all_close(&zero_grad, &expected_zero_grad, 1e-5);
+        assert!(param.borrow().grad().is_none());
     }
 
     #[test]

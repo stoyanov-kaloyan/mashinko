@@ -51,20 +51,18 @@ impl DataLoader {
         let y_tensor = self.dataset.y.borrow().tensor().clone();
         let n_samples = x_tensor.dims()[0] as usize;
 
-        let (x_data, y_data) = if self.shuffle {
+        let permutation = if self.shuffle {
             let shuffle_keys = af::randu::<f32>(Dim4::new(&[n_samples as u64, 1, 1, 1]));
             let (_, permutation) = af::sort_index(&shuffle_keys, 0, true);
-            (
-                af::lookup(&x_tensor, &permutation, 0),
-                af::lookup(&y_tensor, &permutation, 0),
-            )
+            Some(permutation)
         } else {
-            (x_tensor, y_tensor)
+            None
         };
 
         DataLoaderIter {
-            x_data,
-            y_data,
+            x_data: x_tensor,
+            y_data: y_tensor,
+            permutation,
             batch_size: self.batch_size,
             n_samples,
             index: 0,
@@ -141,6 +139,7 @@ impl<'a> IntoIterator for &'a HostDataLoader {
 pub struct DataLoaderIter {
     x_data: Array<f32>,
     y_data: Array<f32>,
+    permutation: Option<Array<u32>>,
     batch_size: usize,
     n_samples: usize,
     index: usize,
@@ -168,29 +167,46 @@ impl Iterator for DataLoaderIter {
         let end = (start + self.batch_size).min(self.n_samples);
         self.index = end;
 
-        let batch_seq = af::Seq::new(start as f64, (end - 1) as f64, 1.0);
+        let x_batch;
+        let y_batch;
+        if let Some(permutation) = &self.permutation {
+            let batch_seq = af::Seq::new(start as f64, (end - 1) as f64, 1.0);
+            let batch_indices = af::index(
+                permutation,
+                &[
+                    batch_seq,
+                    af::Seq::default(),
+                    af::Seq::default(),
+                    af::Seq::default(),
+                ],
+            );
+            x_batch = af::lookup(&self.x_data, &batch_indices, 0);
+            y_batch = af::lookup(&self.y_data, &batch_indices, 0);
+        } else {
+            let batch_seq = af::Seq::new(start as f64, (end - 1) as f64, 1.0);
 
-        let x_dims = self.x_data.dims();
-        let x_batch = af::index(
-            &self.x_data,
-            &[
-                batch_seq,
-                af::Seq::new(0.0, (x_dims[1] as f64) - 1.0, 1.0),
-                af::Seq::new(0.0, (x_dims[2] as f64) - 1.0, 1.0),
-                af::Seq::new(0.0, (x_dims[3] as f64) - 1.0, 1.0),
-            ],
-        );
+            let x_dims = self.x_data.dims();
+            x_batch = af::index(
+                &self.x_data,
+                &[
+                    batch_seq,
+                    af::Seq::new(0.0, (x_dims[1] as f64) - 1.0, 1.0),
+                    af::Seq::new(0.0, (x_dims[2] as f64) - 1.0, 1.0),
+                    af::Seq::new(0.0, (x_dims[3] as f64) - 1.0, 1.0),
+                ],
+            );
 
-        let y_dims = self.y_data.dims();
-        let y_batch = af::index(
-            &self.y_data,
-            &[
-                batch_seq,
-                af::Seq::new(0.0, (y_dims[1] as f64) - 1.0, 1.0),
-                af::Seq::new(0.0, (y_dims[2] as f64) - 1.0, 1.0),
-                af::Seq::new(0.0, (y_dims[3] as f64) - 1.0, 1.0),
-            ],
-        );
+            let y_dims = self.y_data.dims();
+            y_batch = af::index(
+                &self.y_data,
+                &[
+                    batch_seq,
+                    af::Seq::new(0.0, (y_dims[1] as f64) - 1.0, 1.0),
+                    af::Seq::new(0.0, (y_dims[2] as f64) - 1.0, 1.0),
+                    af::Seq::new(0.0, (y_dims[3] as f64) - 1.0, 1.0),
+                ],
+            );
+        }
 
         Some((Node::leaf(x_batch, false), Node::leaf(y_batch, false)))
     }

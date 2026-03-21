@@ -120,3 +120,93 @@ pub fn argmax(array: &Array<f32>) -> Array<u32> {
     let (_, indices) = imax(array, 1);
     indices
 }
+
+/// Parse a CIFAR-10 binary batch file (10000 records, each 1 label + 3072 image bytes).
+/// Returns images as host data in shape [N, 32, 32, 3] (NHWC logical layout),
+/// and labels as class indices in shape [N, 1, 1, 1].
+pub fn parse_cifar10_batch_host(path: &str, normalize: bool) -> (Vec<f32>, Dim4, Vec<f32>, Dim4) {
+    let mut file = std::fs::File::open(path).expect("Failed to open CIFAR-10 batch file");
+    let mut buffer = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut buffer).expect("Failed to read CIFAR-10 file");
+
+    const IMAGE_SIZE: usize = 32 * 32 * 3;
+    const RECORD_SIZE: usize = 1 + IMAGE_SIZE;
+    assert!(
+        buffer.len() % RECORD_SIZE == 0,
+        "Invalid CIFAR-10 file length: {}",
+        buffer.len()
+    );
+
+    let num_samples = buffer.len() / RECORD_SIZE;
+    let mut images = vec![0.0f32; num_samples * IMAGE_SIZE];
+    let mut labels = vec![0.0f32; num_samples];
+
+    // CIFAR layout per record: [label][1024 R][1024 G][1024 B]
+    // Output layout: [N, H, W, C] in ArrayFire logical indexing.
+    for sample in 0..num_samples {
+        let base = sample * RECORD_SIZE;
+        labels[sample] = buffer[base] as f32;
+
+        for channel in 0..3usize {
+            for pixel in 0..1024usize {
+                let row = pixel / 32;
+                let col = pixel % 32;
+                let src = base + 1 + channel * 1024 + pixel;
+                let mut v = buffer[src] as f32;
+                if normalize {
+                    v /= 255.0f32;
+                }
+                let dst = sample
+                    + num_samples * (row + 32usize * (col + 32usize * channel));
+                images[dst] = v;
+            }
+        }
+    }
+
+    (
+        images,
+        Dim4::new(&[num_samples as u64, 32, 32, 3]),
+        labels,
+        Dim4::new(&[num_samples as u64, 1, 1, 1]),
+    )
+}
+
+/// Parse all CIFAR-10 training batches from a directory containing data_batch_1..5.bin.
+pub fn parse_cifar10_train_host(
+    dir: &str,
+    normalize: bool,
+) -> (Vec<f32>, Dim4, Vec<f32>, Dim4) {
+    let mut all_images: Vec<f32> = Vec::new();
+    let mut all_labels: Vec<f32> = Vec::new();
+    let mut total_samples = 0u64;
+
+    for batch in 1..=5 {
+        let path = format!("{dir}/data_batch_{batch}.bin");
+        let (images, image_dims, labels, _) = parse_cifar10_batch_host(&path, normalize);
+        if total_samples == 0 {
+            all_images = vec![0.0f32; (50000 * 32 * 32 * 3) as usize];
+            all_labels = vec![0.0f32; 50000];
+        }
+
+        let n = image_dims[0] as usize;
+        let feature_stride = (32 * 32 * 3) as usize;
+        for feature in 0..feature_stride {
+            let dst_col_offset = feature * 50000usize;
+            let src_col_offset = feature * n;
+            for i in 0..n {
+                all_images[(total_samples as usize) + i + dst_col_offset] = images[i + src_col_offset];
+            }
+        }
+        for i in 0..n {
+            all_labels[(total_samples as usize) + i] = labels[i];
+        }
+        total_samples += n as u64;
+    }
+
+    (
+        all_images,
+        Dim4::new(&[total_samples, 32, 32, 3]),
+        all_labels,
+        Dim4::new(&[total_samples, 1, 1, 1]),
+    )
+}

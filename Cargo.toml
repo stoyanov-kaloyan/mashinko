@@ -6,3 +6,7 @@ edition = "2024"
 [dependencies]
 arrayfire = "3.8.0"
 rand = "0.10.0"
+
+[profile.profiling]
+inherits = "release"
+debug = true

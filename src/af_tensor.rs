@@ -216,8 +216,9 @@ impl Node {
         let log_sum_exp_tiled =
             arrayfire::tile(&log_sum_exp, arrayfire::Dim4::new(&[1, n_classes, 1, 1]));
         let log_probs = &shifted - &log_sum_exp_tiled;
-        let nll = -arrayfire::sum_all(&(&target_tensor * &log_probs)).0 as f32 / batch;
-        let loss = Array::new(&[nll], arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        let nll = -arrayfire::sum(&(&target_tensor * &log_probs), 1); // [batch,1,1,1]
+        let loss_sum = reduce_sum_all_device(&nll); // [1,1,1,1]
+        let loss = &loss_sum * &arrayfire::constant(1.0f32 / batch, loss_sum.dims());
 
         Self::from_op(
             loss,
@@ -241,8 +242,8 @@ impl Node {
         let stable_term = arrayfire::log1p(&arrayfire::exp(&(&abs_logits.mul(-1))));
         let per_elem = &max_logits - &(&logits * &target_tensor) + &stable_term;
         let num_elements = logits.elements() as f32;
-        let loss_val = arrayfire::sum_all(&per_elem).0 as f32 / num_elements;
-        let loss = Array::new(&[loss_val], arrayfire::Dim4::new(&[1, 1, 1, 1]));
+        let loss_sum = reduce_sum_all_device(&per_elem); // [1,1,1,1]
+        let loss = &loss_sum * &arrayfire::constant(1.0f32 / num_elements, loss_sum.dims());
 
         let probs = 1.0f32 / (1.0f32 + arrayfire::exp(&(&logits.mul(-1))));
 
@@ -411,11 +412,7 @@ impl Node {
                 arrayfire::seq!(),
             ]
         };
-        arrayfire::assign_seq(
-            &mut mask,
-            &mask_seqs,
-            &mask_covered,
-        );
+        arrayfire::assign_seq(&mut mask, &mask_seqs, &mask_covered);
 
         Self::from_op(
             output,
@@ -466,6 +463,10 @@ impl Node {
 
     pub fn set_grad(&mut self, grad: Array<f32>) {
         self.grad = Some(grad);
+    }
+
+    pub fn clear_grad(&mut self) {
+        self.grad = None;
     }
 
     /// Run a single backward step for this node
@@ -712,11 +713,7 @@ impl Node {
                         arrayfire::seq!(),
                     ]
                 };
-                arrayfire::assign_seq(
-                    &mut upsampled_dz,
-                    &dz_seqs,
-                    &upsampled_covered,
-                );
+                arrayfire::assign_seq(&mut upsampled_dz, &dz_seqs, &upsampled_covered);
                 let da = upsampled_dz * mask;
                 acc_grad(&self.parents[0], &da);
             }
@@ -768,6 +765,16 @@ fn acc_grad(node: &NodeRef, contribution: &Array<f32>) {
         Some(existing) => existing + &reduced,
         None => reduced,
     });
+}
+
+fn reduce_sum_all_device(input: &Array<f32>) -> Array<f32> {
+    let mut out = input.clone();
+    for dim in 0..4 {
+        if out.dims()[dim] > 1 {
+            out = arrayfire::sum(&out, dim as i32);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
